@@ -1,7 +1,7 @@
 import configparser, os, logging
 
 from application.common.path_utils import PathUtils
-from elasticsearch import Elasticsearch
+from elasticsearch import Elasticsearch, helpers
 
 logging.basicConfig(level=logging.INFO)
 g_root_path = os.path.abspath(os.path.dirname(os.path.abspath(os.path.dirname(__file__))))
@@ -42,6 +42,21 @@ class EsHelper:
         )
         tokens = [item['token'] for item in response['tokens']]
         return tokens
+
+    def create_index(self, index_name, index_info):
+        # 해당 인덱스 존재 확인
+        is_exist = self.es.indices.exists(index=index_name)
+        if not is_exist:
+            self.es.indices.create(index=index_name, body=index_info)
+
+    def bulk_insert(self, docs):
+        helpers.bulk(self.es, docs)
+
+    def search(self, index, query):
+        return self.es.search(
+                    index=index,
+                    query=query
+                )
 
 
 if __name__ == '__main__':
