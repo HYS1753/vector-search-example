@@ -1,8 +1,14 @@
 import pandas as pd
+from gensim.models import Doc2Vec
 from pecab import PeCab
 import os
-import requests, pandas
+
+from application.config.elasticsearch.es_helper import EsHelper
+from application.indexing.indexing_bestseller import IndexingBestseller
+from application.pre_process.download_bestseller import DownloadBestSeller, CorpEnum
 from application.common.path_utils import PathUtils
+from application.pre_process.training_doc2vec import TrainingDoc2vec
+
 
 def pacab_test():
     pecab = PeCab()
@@ -15,29 +21,56 @@ def pacab_test():
 
 g_pathUtils = PathUtils(os.path.dirname(__file__))
 
-# 교보문고
-g_kyobo_best_seller_url = "https://store.kyobobook.co.kr/api/gw/best/file/downloads/excel?period=001&dsplDvsnCode=000&dsplTrgtDvsnCode=001&bestSeller=02"
-# YES24
-g_yes24_best_seller_url = "https://www.yes24.com/Product/Category/BestSellerExcel"
-g_yes24_best_seller_data = {
-    "bestType": "YES24_BESTSELLER",
-    "categoryNumber": "001",
-    "sex": "A",
-    "age": "255",
-    "pageNumber": "1",
-    "pageSize": "5",
-    "goodsStatGb": "06"
-}
+def indexing():
+    # 0. file download
+    downloader = DownloadBestSeller(type=CorpEnum.YES24)
+    file_path = downloader.download()
 
-def main():
-    response = requests.post(g_yes24_best_seller_url, data=g_yes24_best_seller_data)
-    file_path = os.path.join(g_pathUtils.find_resource_dir(), "data", "yes24.xlsx")
-    with open(file_path, "wb") as file:
-        file.write(response.content)
+    # 1. training doc2vec
+    doc2vec = TrainingDoc2vec(file_path)
+    model_path = doc2vec.doc2vec_training()
 
-    df = pd.read_excel(file_path)
-    print(df)
+    # 2. indexing
+    indexing = IndexingBestseller(index_name="bestseller", model_path=model_path)
+    indexing.index_setting()
+    doc = indexing.make_document_dataframe(file_path)
+    indexing.bulk_index(doc)
+
+def search():
+    # Set model
+    path_utils = PathUtils(os.path.dirname(__file__))
+    model_path = os.path.join(path_utils.find_resource_dir(), "model", "doc2vec.model")
+    model = Doc2Vec.load(model_path)
+
+    # infer_vector
+    es_helper = EsHelper()
+    query = "고전 인문학"
+    vector = model.infer_vector(es_helper.get_analyzed_token("nori", query))
+
+    # search
+    search_qeury = {
+        "script_score": {
+            "query": {
+                "match_all": {}
+            },
+            "script": {
+                "source": "cosineSimilarity(params.query_vector, 'description_vector') + 1.0",
+                "params": {
+                    "query_vector": vector.tolist()
+                }
+            }
+        }
+    }
+    print(search_qeury)
+    response = es_helper.search(index="bestseller", query=search_qeury)
+    print(response)
+    hits = response["hits"]["hits"]
+    for doc in hits:
+        print(doc["_source"]["book_name"])
+        print(doc["_source"]["description"])
+        print("================================================================================================")
+
 
 # Press the green button in the gutter to run the script.
 if __name__ == '__main__':
-    main()
+    search()
